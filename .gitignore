@@ -1,0 +1,27 @@
+# Entornos virtuales y dependencias
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+
+# Configuraciones de IDE
+.idea/
+.vscode/
+
+# Datos generados (no versionar)
+data/raw/
+data/interim/
+data/processed/
+
+# Archivos CSV en cualquier ubicación
+*.csv
+
+# Resultados de experimentos
+experiments/runs/
+
+# Archivos de build y distribución
+build/
+dist/
+*.egg-info/

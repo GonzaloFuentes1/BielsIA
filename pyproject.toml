@@ -1,0 +1,26 @@
+[project]
+name = "bielsia"
+version = "0.1.0"
+description = "Un sistema de recomendación de fichajes en fútbol basado en grafos y GNNs."
+requires-python = ">=3.10"
+dependencies = [
+    "torch",
+    "torch-geometric",
+    "pandas",
+    "numpy",
+    "scikit-learn",
+    "matplotlib",
+    "pyyaml",
+    "tqdm",
+    "loguru"
+]
+
+[project.scripts]
+bielsia = "bielsia.cli:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "ruff",
+    "ipykernel"
+]
