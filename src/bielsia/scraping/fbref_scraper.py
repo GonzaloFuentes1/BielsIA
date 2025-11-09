@@ -32,7 +32,8 @@ for handler in logging.root.handlers:
             except Exception:
                 pass  # Ignorar si no se puede reconfigurar
 
-# --- CONFIGURACIÓN OPTIMIZADA DE DELAYS ---
+# --- CONFIGURACIÓN DE PARÁMETROS ---
+# Tipos de estadísticas disponibles
 PLAYER_SEASON_STATS_TYPES = ['standard', 'shooting', 'passing', 'passing_types', 
                                'goal_shot_creation', 'defense', 'possession', 
                                'playing_time', 'misc']
@@ -41,13 +42,18 @@ TEAM_SEASON_STATS_TYPES = ['standard', 'shooting', 'passing', 'passing_types',
 MATCH_DATA_TYPES = ['lineup', 'shot_events']
 PLAYER_MATCH_STATS_TYPES = ['summary', 'passing', 'passing_types', 'defense', 
                               'possession', 'misc']
-DELAY_BETWEEN_STAT_TYPES = 60
-DELAY_BETWEEN_DATA_TYPES = 5
-DELAY_IN_BATCH_MATCH = 10  # Reducido a 10s con paralelismo
-DELAY_BETWEEN_BATCHES = 30
-BATCH_SIZE = 20
-MAX_RETRIES = 2
-MAX_WORKERS = 8  # Número de procesos paralelos
+
+# Delays y rate limiting
+DELAY_BETWEEN_STAT_TYPES = 60  # Segundos entre tipos de estadísticas
+DELAY_BETWEEN_DATA_TYPES = 5   # Segundos entre tipos de datos del mismo partido
+DELAY_IN_BATCH_MATCH = 10      # Segundos entre partidos en un batch
+DELAY_BETWEEN_BATCHES = 30     # Segundos entre batches de partidos
+
+# Configuración de batches y paralelismo
+BATCH_SIZE = 20                # Partidos por batch en descarga de match data
+MATCH_STATS_BATCH_SIZE = 50    # Partidos por batch en player match stats
+MAX_RETRIES = 2                # Número de reintentos en caso de error
+MAX_WORKERS = 1                # Número de procesos paralelos
 
 
 def download_season_schedule(league: str, season: int) -> pd.DataFrame:
@@ -310,15 +316,82 @@ def run_smoke_test(interim_dir: Path, league: str, season: int, num_matches: int
     logging.info("=== SMOKE TEST completado ===")
 
 
+def download_match_data_batch(league: str, season: int, match_ids: List[str]) -> Dict[str, pd.DataFrame]:
+    """
+    Descarga datos de partido (lineup + shots) para múltiples partidos en batch.
+    Aprovecha que read_lineup y read_shot_events aceptan listas de match_ids.
+    
+    Returns:
+        Dict con 'lineup' y 'shot_events' DataFrames
+    """
+    match_data = {}
+    fbref_instance = sd.FBref(leagues=league, seasons=season)
+    
+    for data_type in MATCH_DATA_TYPES:
+        for attempt in range(MAX_RETRIES):
+            try:
+                if data_type == 'lineup':
+                    df = fbref_instance.read_lineup(match_id=match_ids)
+                elif data_type == 'shot_events':
+                    df = fbref_instance.read_shot_events(match_id=match_ids)
+                
+                if not df.empty:
+                    match_data[data_type] = df
+                    logging.info(f"  ✓ {data_type}: {len(df)} registros descargados")
+                    break
+                else:
+                    logging.warning(f"  - {data_type}: DataFrame vacío")
+                    break
+                    
+            except Exception as e:
+                if attempt < MAX_RETRIES - 1:
+                    wait_time = 30
+                    logging.warning(f"  Error en '{data_type}': {str(e)[:100]}... Reintentando en {wait_time}s...")
+                    time.sleep(wait_time)
+                else:
+                    logging.error(f"  ✗ Fallo en '{data_type}': {str(e)[:100]}")
+        
+        # Delay entre tipos de datos
+        if data_type != MATCH_DATA_TYPES[-1]:
+            time.sleep(DELAY_BETWEEN_DATA_TYPES)
+    
+    return match_data
+
+
+def save_match_data_by_game(df: pd.DataFrame, data_type: str, interim_dir: Path, 
+                            league: str, season: int):
+    """
+    Guarda un DataFrame de datos de partido separándolo por game_id individual.
+    """
+    if df.empty:
+        return
+    
+    # El DataFrame viene con MultiIndex (league, season, game)
+    df_reset = df.reset_index()
+    
+    for game_id in df_reset['game'].unique():
+        game_df = df_reset[df_reset['game'] == game_id]
+        
+        # Extraer el match_id del game si está disponible
+        if 'game_id' in game_df.columns:
+            match_id = game_df['game_id'].iloc[0]
+        else:
+            # Usar el game como match_id
+            match_id = game_id
+        
+        file_path = interim_dir / "match_data" / data_type / f"{league}_{season}_{match_id}.csv"
+        save_data(game_df, file_path)
+
+
 def run_full_download(interim_dir: Path, league: str, seasons: List[int] = None):
     """
-    Descarga completa de TODOS los datos disponibles con procesamiento paralelo.
+    Descarga completa de TODOS los datos disponibles con procesamiento optimizado por batches.
     """
     if seasons is None:
         seasons = [2023]
     
     logging.info(f"=== DESCARGA COMPLETA: {league} ({len(seasons)} temporadas) ===")
-    logging.info(f"Procesamiento paralelo: {MAX_WORKERS} workers")
+    logging.info(f"Procesamiento optimizado por batches")
     logging.info(f"Tipos de datos: Player season stats ({len(PLAYER_SEASON_STATS_TYPES)}), "
                  f"Team season stats ({len(TEAM_SEASON_STATS_TYPES)}), "
                  f"Match data ({len(MATCH_DATA_TYPES)}), "
@@ -386,8 +459,8 @@ def run_full_download(interim_dir: Path, league: str, seasons: List[int] = None)
         total_matches = len(match_ids)
         logging.info(f"  - Calendario: {total_matches} partidos")
 
-        # ==== 4. DATOS DE PARTIDO (LINEUP + SHOTS) - PARALELO ====
-        logging.info(f"\n[4/6] Descargando datos de partido (lineup + shots) - MODO PARALELO...")
+        # ==== 4. DATOS DE PARTIDO (LINEUP + SHOTS) - MODO BATCH OPTIMIZADO ====
+        logging.info(f"\n[4/6] Descargando datos de partido (lineup + shots) - MODO BATCH OPTIMIZADO...")
         
         downloaded_matches = get_downloaded_matches(interim_dir, league, season)
         pending_matches = [mid for mid in match_ids if mid not in downloaded_matches]
@@ -400,45 +473,98 @@ def run_full_download(interim_dir: Path, league: str, seasons: List[int] = None)
             logging.info("  [CHECKPOINT] Todos los partidos ya fueron descargados. Saltando paso 4.")
         else:
             num_batches = (len(pending_matches) + BATCH_SIZE - 1) // BATCH_SIZE
-            logging.info(f"  Procesando en {num_batches} batches con {MAX_WORKERS} workers...")
+            logging.info(f"  Procesando en {num_batches} batches de hasta {BATCH_SIZE} partidos...")
             
             successful = 0
             for batch_num in range(0, len(pending_matches), BATCH_SIZE):
                 batch_match_ids = pending_matches[batch_num:batch_num + BATCH_SIZE]
                 
                 logging.info(f"\n  [BATCH {batch_num // BATCH_SIZE + 1}/{num_batches}] "
-                           f"Partidos {batch_num + 1}-{min(batch_num + BATCH_SIZE, len(pending_matches))}")
+                           f"Procesando {len(batch_match_ids)} partidos...")
                 
-                batch_data = download_batch_matches(league, season, batch_match_ids, interim_dir)
+                try:
+                    # Descargar todos los partidos del batch de una vez
+                    batch_data = download_match_data_batch(league, season, batch_match_ids)
+                    
+                    # Guardar los datos separados por partido
+                    for data_type, df in batch_data.items():
+                        save_match_data_by_game(df, data_type, interim_dir, league, season)
+                    
+                    successful += len(batch_match_ids)
+                    logging.info(f"  [OK] {len(batch_match_ids)} partidos procesados")
+                    
+                except Exception as e:
+                    logging.error(f"  [ERROR] Fallo en batch: {e}")
                 
-                successful += len(batch_data)
-                
-                logging.info(f"  [OK] {len(batch_data)}/{len(batch_match_ids)} partidos nuevos")
-                
+                # Pausa entre batches
                 if batch_num + BATCH_SIZE < len(pending_matches):
                     logging.info(f"  [PAUSA] {DELAY_BETWEEN_BATCHES}s...")
                     time.sleep(DELAY_BETWEEN_BATCHES)
             
-            logging.info(f"  Total nuevos descargados: {successful}/{len(pending_matches)} partidos")
+            logging.info(f"  Total descargados: {successful}/{len(pending_matches)} partidos")
 
         # ==== 5. STATS DE JUGADORES POR PARTIDO ====
         logging.info(f"\n[5/6] Descargando stats de jugadores por partido...")
-        for stat_type in PLAYER_MATCH_STATS_TYPES:
-            file_path = interim_dir / "player_match_stats" / f"{league}_{season}_{stat_type}.csv"
+        
+        # Verificar qué partidos ya tienen datos descargados
+        downloaded_matches = get_downloaded_matches(interim_dir, league, season)
+        pending_matches = [mid for mid in match_ids if mid not in downloaded_matches]
+        
+        logging.info(f"  Total: {total_matches} partidos")
+        logging.info(f"  Ya procesados: {len(downloaded_matches)} partidos")
+        logging.info(f"  Pendientes: {len(pending_matches)} partidos")
+        
+        if not pending_matches:
+            logging.info("  [CHECKPOINT] Todos los partidos ya fueron procesados. Saltando paso 5.")
+        else:
+            # Descargar en batches para evitar listas demasiado largas
+            MATCH_STATS_BATCH_SIZE = 50  # Procesar 50 partidos a la vez
+            num_batches = (len(pending_matches) + MATCH_STATS_BATCH_SIZE - 1) // MATCH_STATS_BATCH_SIZE
             
-            if file_exists(file_path):
-                logging.info(f"  - {stat_type}: [EXISTE] Saltando...")
-                continue
-            
-            try:
-                fbref = sd.FBref(leagues=league, seasons=season)
-                stats_df = fbref.read_player_match_stats(stat_type=stat_type, force_cache=False)
-                if not stats_df.empty:
-                    save_data(stats_df.reset_index(), file_path)
-                    logging.info(f"  - {stat_type}: {len(stats_df)} registros")
-                time.sleep(DELAY_BETWEEN_STAT_TYPES)
-            except Exception as e:
-                logging.error(f"  - Error en {stat_type}: {e}")
+            for stat_type in PLAYER_MATCH_STATS_TYPES:
+                file_path = interim_dir / "player_match_stats" / f"{league}_{season}_{stat_type}.csv"
+                
+                if file_exists(file_path):
+                    logging.info(f"  - {stat_type}: [EXISTE] Saltando...")
+                    continue
+                
+                logging.info(f"  - {stat_type}: Procesando {len(pending_matches)} partidos en {num_batches} batches...")
+                
+                all_stats = []
+                try:
+                    for batch_num in range(0, len(pending_matches), MATCH_STATS_BATCH_SIZE):
+                        batch_match_ids = pending_matches[batch_num:batch_num + MATCH_STATS_BATCH_SIZE]
+                        
+                        logging.info(f"    Batch {batch_num // MATCH_STATS_BATCH_SIZE + 1}/{num_batches}: "
+                                   f"{len(batch_match_ids)} partidos...")
+                        
+                        fbref = sd.FBref(leagues=league, seasons=season)
+                        stats_df = fbref.read_player_match_stats(
+                            stat_type=stat_type, 
+                            match_id=batch_match_ids,
+                            force_cache=False
+                        )
+                        
+                        if not stats_df.empty:
+                            all_stats.append(stats_df)
+                            logging.info(f"    ✓ {len(stats_df)} registros descargados")
+                        
+                        # Pausa entre batches para respetar rate limiting
+                        if batch_num + MATCH_STATS_BATCH_SIZE < len(pending_matches):
+                            time.sleep(DELAY_BETWEEN_BATCHES)
+                    
+                    # Combinar todos los batches y guardar
+                    if all_stats:
+                        combined_df = pd.concat(all_stats, ignore_index=False)
+                        save_data(combined_df.reset_index(), file_path)
+                        logging.info(f"  - {stat_type}: {len(combined_df)} registros totales guardados")
+                    else:
+                        logging.warning(f"  - {stat_type}: No se descargaron datos")
+                    
+                    time.sleep(DELAY_BETWEEN_STAT_TYPES)
+                    
+                except Exception as e:
+                    logging.error(f"  - Error en {stat_type}: {e}")
 
         # ==== 6. EVENTOS DE PARTIDO ====
         logging.info(f"\n[6/6] Descargando eventos de partido...")
