@@ -20,6 +20,8 @@ data/processed/
 
 # Resultados de experimentos
 experiments/runs/
+models/
+*.pth
 
 # Archivos de build y distribución
 build/

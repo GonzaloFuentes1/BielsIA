@@ -44,13 +44,13 @@ PLAYER_MATCH_STATS_TYPES = ['summary', 'passing', 'passing_types', 'defense',
                               'possession', 'misc']
 
 # Delays y rate limiting
-DELAY_BETWEEN_STAT_TYPES = 60  # Segundos entre tipos de estadísticas
+DELAY_BETWEEN_STAT_TYPES = 5  # Segundos entre tipos de estadísticas
 DELAY_BETWEEN_DATA_TYPES = 5   # Segundos entre tipos de datos del mismo partido
 DELAY_IN_BATCH_MATCH = 10      # Segundos entre partidos en un batch
-DELAY_BETWEEN_BATCHES = 30     # Segundos entre batches de partidos
+DELAY_BETWEEN_BATCHES = 1     # Segundos entre batches de partidos
 
 # Configuración de batches y paralelismo
-BATCH_SIZE = 20                # Partidos por batch en descarga de match data
+BATCH_SIZE = 60                # Partidos por batch en descarga de match data
 MATCH_STATS_BATCH_SIZE = 50    # Partidos por batch en player match stats
 MAX_RETRIES = 2                # Número de reintentos en caso de error
 MAX_WORKERS = 1                # Número de procesos paralelos
@@ -283,37 +283,6 @@ def get_downloaded_matches(interim_dir: Path, league: str, season: int) -> set:
         downloaded.add(match_id)
     
     return downloaded
-
-
-def run_smoke_test(interim_dir: Path, league: str, season: int, num_matches: int = 2):
-    """Ejecuta una prueba de descarga limitada para N partidos y stats de temporada."""
-    logging.info(f"=== SMOKE TEST: {league} temp. {season} ({num_matches} partidos) ===")
-    
-    # 1. Descargar stats de temporada (más rápido)
-    for stat_type in PLAYER_SEASON_STATS_TYPES:
-        stats_df = download_player_season_stats(league, season, stat_type)
-        if not stats_df.empty:
-            file_path = interim_dir / "player_stats" / f"{league}_{season}_{stat_type}.csv"
-            save_data(stats_df, file_path)
-        time.sleep(DELAY_BETWEEN_STAT_TYPES)
-
-    # 2. Descargar datos de partidos
-    schedule_df = download_season_schedule(league, season)
-    if schedule_df.empty:
-        logging.error("No se pudo descargar el calendario.")
-        return
-
-    save_data(schedule_df, interim_dir / f"schedule_{league}_{season}.csv")
-    match_ids = schedule_df['game_id'].head(num_matches).tolist()
-    
-    for match_id in match_ids:
-        match_data = download_match_data_safe(league, season, match_id)
-        for data_type, df in match_data.items():
-            data_path = interim_dir / data_type / f"{league}_{season}_{match_id}.csv"
-            save_data(df, data_path)
-        time.sleep(30)  # Incrementado de 5 a 30 segundos entre partidos
-            
-    logging.info("=== SMOKE TEST completado ===")
 
 
 def download_match_data_batch(league: str, season: int, match_ids: List[str]) -> Dict[str, pd.DataFrame]:
@@ -603,9 +572,9 @@ if __name__ == "__main__":
 
     ROOT_DIR = Path(__file__).resolve().parents[3]
     INTERIM_DATA_DIR = ROOT_DIR / "data" / "interim"
+    seasons_list = [int(s.strip()) for s in args.seasons.split(',')]
+    run_full_download(INTERIM_DATA_DIR, args.league, seasons=seasons_list)
 
-    if args.mode == "smoke-test":
-        run_smoke_test(INTERIM_DATA_DIR, args.league, args.season, args.matches)
-    else:
-        seasons_list = [int(s.strip()) for s in args.seasons.split(',')]
-        run_full_download(INTERIM_DATA_DIR, args.league, seasons=seasons_list)
+
+# Para ejecutar la descarga de las temporadas 2016 a 2024 de la Premier League:
+# python -m src.bielsia.scraping.fbref_scraper full-download --league "ENG-Premier League" --seasons "2016,2017,2018,2019,2020,2021,2022,2023,2024"

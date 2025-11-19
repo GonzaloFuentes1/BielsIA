@@ -1,0 +1,33 @@
+data:
+  interim_path: data/interim
+  seasons:
+  - 2020
+  - 2021
+  - 2022
+  - 2023
+  - 2024
+experiment:
+  description: Transformer con encoder Graphormer (Improved)
+  name: transformer_graphormer
+model:
+  dropout: 0.3
+  gnn_hidden: 256
+  gnn_out: 256
+  gnn_type: graphormer
+  heads: 8
+  hidden_channels: 256
+  in_channels: auto
+  num_layers: 4
+  out_channels: auto
+  transformer_hidden: 256
+  transformer_layers: 4
+  type: transformer
+training:
+  batch_size: 1
+  device: auto
+  epochs: 3000
+  log_interval: 100
+  lr: 0.0005
+  patience: 500
+  save_dir: models
+  save_name: transformer_graphormer.pth

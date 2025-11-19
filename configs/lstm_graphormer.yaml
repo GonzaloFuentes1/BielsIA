@@ -1,0 +1,31 @@
+data:
+  interim_path: data/interim
+  seasons:
+  - 2020
+  - 2021
+  - 2022
+  - 2023
+  - 2024
+experiment:
+  description: LSTM con encoder Graphormer (Improved)
+  name: lstm_graphormer
+model:
+  dropout: 0.3
+  gnn_hidden: 256
+  gnn_out: 256
+  gnn_type: graphormer
+  heads: 8
+  hidden_channels: 256
+  in_channels: auto
+  lstm_hidden: 256
+  out_channels: auto
+  type: lstm
+training:
+  batch_size: 1
+  device: auto
+  epochs: 3000
+  log_interval: 100
+  lr: 0.0005
+  patience: 500
+  save_dir: models
+  save_name: lstm_graphormer.pth
