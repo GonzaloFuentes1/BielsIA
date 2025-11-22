@@ -35,19 +35,19 @@ except ImportError:
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 
-def _load_team_stats(interim_dir: Path, season: int) -> pd.DataFrame:
+def _load_team_stats(interim_dir: Path, season: int, league: str) -> pd.DataFrame:
     """
     Carga y procesa las estadísticas de equipo para agregar contexto.
     Retorna un DataFrame con index=team y columnas de contexto.
     """
-    logging.info(f"Cargando estadísticas de equipo para la temporada {season}...")
+    # logging.info(f"Cargando estadísticas de equipo para la temporada {season} ({league})...")
     
     # 1. Possession
-    poss_path = interim_dir / "team_season_stats" / f"ENG-Premier League_{season}_possession.csv"
+    poss_path = interim_dir / "team_season_stats" / f"{league}_{season}_possession.csv"
     # 2. Standard (Goals For)
-    std_path = interim_dir / "team_season_stats" / f"ENG-Premier League_{season}_standard.csv"
+    std_path = interim_dir / "team_season_stats" / f"{league}_{season}_standard.csv"
     # 3. Defense (Tackles/Int as proxy for defensive work)
-    def_path = interim_dir / "team_season_stats" / f"ENG-Premier League_{season}_defense.csv"
+    def_path = interim_dir / "team_season_stats" / f"{league}_{season}_defense.csv"
     
     team_stats = pd.DataFrame()
     
@@ -81,34 +81,30 @@ def _load_team_stats(interim_dir: Path, season: int) -> pd.DataFrame:
                     team_stats = pd.merge(team_stats, df_def, on='team', how='outer')
                     
     except Exception as e:
-        logging.error(f"Error cargando team stats: {e}")
+        logging.error(f"Error cargando team stats para {league}: {e}")
         return pd.DataFrame()
         
     return team_stats
 
 
-def _load_shot_events(interim_dir: Path, season: int) -> pd.DataFrame:
+def _load_shot_events(interim_dir: Path, season: int, league: str) -> pd.DataFrame:
     """
     Carga y agrega los eventos de tiro para obtener métricas avanzadas por jugador.
     """
-    logging.info(f"Cargando eventos de tiro para la temporada {season}...")
+    # logging.info(f"Cargando eventos de tiro para la temporada {season} ({league})...")
     
     shots_dir = interim_dir / "match_data" / "shot_events"
-    # Patrón: ENG-Premier League_{season}_*.csv
-    # Nota: El season en el nombre del archivo suele ser el año de inicio (2020) o fin (2021)?
-    # En los archivos listados vimos: ENG-Premier League_2020_*.csv
-    # Asumimos que el parámetro 'season' coincide con el del nombre del archivo.
     
-    file_pattern = str(shots_dir / f"ENG-Premier League_{season}_*.csv")
+    file_pattern = str(shots_dir / f"{league}_{season}_*.csv")
     all_files = glob.glob(file_pattern)
     
     if not all_files:
-        logging.warning(f"No se encontraron archivos de tiros para el patrón: {file_pattern}")
+        # logging.warning(f"No se encontraron archivos de tiros para el patrón: {file_pattern}")
         return pd.DataFrame()
     
     # Leer y concatenar (puede ser pesado, optimizar si es necesario)
     df_list = []
-    for f in tqdm(all_files, desc="Leyendo shot events", leave=False):
+    for f in tqdm(all_files, desc=f"Leyendo shot events {league}", leave=False):
         try:
             df = pd.read_csv(f)
             df_list.append(df)
@@ -182,89 +178,116 @@ def _load_player_stats_for_season(interim_dir: Path, season: int) -> Tuple[pd.Da
     """Carga y procesa las estadísticas de jugadores para **una** temporada.
     
     Fusiona 'standard', 'defense', 'passing', 'possession' y 'misc' para tener un set de features completo.
+    Soporta múltiples ligas.
     """
 
     logging.info(f"Cargando estadísticas de jugadores para la temporada: {season}")
 
-    # 1. Cargar Standard Stats (Base)
-    std_path = interim_dir / "player_season_stats" / f"ENG-Premier League_{season}_standard.csv"
-    try:
-        df_std = pd.read_csv(std_path)
-    except FileNotFoundError:
-        logging.error(f"Archivo no encontrado: {std_path}")
+    # Detectar ligas disponibles
+    pattern = str(interim_dir / "player_season_stats" / f"*_{season}_standard.csv")
+    files = glob.glob(pattern)
+    leagues = []
+    for f in files:
+        filename = Path(f).name
+        # filename format: {League}_{Season}_standard.csv
+        suffix = f"_{season}_standard.csv"
+        if filename.endswith(suffix):
+            league = filename[:-len(suffix)]
+            leagues.append(league)
+            
+    if not leagues:
+        logging.error(f"No se encontraron datos para la temporada {season}")
         return pd.DataFrame(), {}
+        
+    logging.info(f"Ligas encontradas para {season}: {leagues}")
+    
+    all_league_dfs = []
 
-    # Lista de archivos adicionales a fusionar
-    # (nombre_archivo_sufijo, [columnas_interes])
-    # Si columnas_interes es None, se toman todas (menos las repetidas)
-    additional_files = [
-        ("defense", ['tackles_tkl', 'tackles_tklw', 'int_', 'clr_', 'blocks_blocks']),
-        ("passing", ['total_cmp%', 'total_prgdist', 'kp_', 'ppa_', 'prgp_']),
-        ("possession", ['touches_att_pen', 'take-ons_succ', 'carries_prgdist', 'carries_prgc', 'receiving_prgr']),
-        ("misc", ['performance_recov', 'aerial_duels_won%'])
-    ]
-
-    merge_keys = ['player', 'team']
-    player_stats_df = df_std
-
-    for suffix, cols_to_keep in additional_files:
-        file_path = interim_dir / "player_season_stats" / f"ENG-Premier League_{season}_{suffix}.csv"
+    for league in leagues:
+        # 1. Cargar Standard Stats (Base)
+        std_path = interim_dir / "player_season_stats" / f"{league}_{season}_standard.csv"
         try:
-            df_add = pd.read_csv(file_path)
-            
-            # Validar claves
-            if not all(k in df_add.columns for k in merge_keys):
-                logging.warning(f"Claves de fusión faltantes en {suffix}. Saltando.")
-                continue
-
-            # Seleccionar columnas
-            if cols_to_keep:
-                # Filtrar solo las que existen
-                valid_cols = [c for c in cols_to_keep if c in df_add.columns]
-                cols_selection = merge_keys + valid_cols
-                df_subset = df_add[cols_selection]
-            else:
-                df_subset = df_add
-
-            # Merge
-            player_stats_df = pd.merge(player_stats_df, df_subset, on=merge_keys, how='left')
-            
-            # Rellenar NaNs de las nuevas columnas con 0
-            new_cols = [c for c in df_subset.columns if c not in merge_keys]
-            player_stats_df[new_cols] = player_stats_df[new_cols].fillna(0)
-            
+            df_std = pd.read_csv(std_path)
         except FileNotFoundError:
-            logging.warning(f"Archivo {suffix} no encontrado: {file_path}. Saltando.")
+            logging.error(f"Archivo no encontrado: {std_path}")
             continue
 
-    logging.info(f"Columnas finales tras merge: {list(player_stats_df.columns)}")
-    
-    # --- NUEVO: Cargar y fusionar Team Stats ---
-    team_stats_df = _load_team_stats(interim_dir, season)
-    if not team_stats_df.empty:
-        player_stats_df = pd.merge(player_stats_df, team_stats_df, on='team', how='left')
-        # Rellenar NaNs en team stats (por si acaso)
-        team_cols = [c for c in team_stats_df.columns if c != 'team']
-        player_stats_df[team_cols] = player_stats_df[team_cols].fillna(0)
-        logging.info(f"Team stats fusionadas. Columnas: {team_cols}")
-    
-    # --- NUEVO: Cargar y fusionar Shot Events ---
-    shot_events_df = _load_shot_events(interim_dir, season)
-    if not shot_events_df.empty:
-        # Merge por player y team
-        player_stats_df = pd.merge(player_stats_df, shot_events_df, on=['player', 'team'], how='left')
-        shot_cols = [c for c in shot_events_df.columns if c not in ['player', 'team']]
-        player_stats_df[shot_cols] = player_stats_df[shot_cols].fillna(0)
-        logging.info(f"Shot events fusionados. Columnas: {shot_cols}")
+        # Lista de archivos adicionales a fusionar
+        additional_files = [
+            ("defense", ['tackles_tkl', 'tackles_tklw', 'int_', 'clr_', 'blocks_blocks']),
+            ("passing", ['total_cmp%', 'total_prgdist', 'kp_', 'ppa_', 'prgp_']),
+            ("possession", ['touches_att_pen', 'take-ons_succ', 'carries_prgdist', 'carries_prgc', 'receiving_prgr']),
+            ("misc", ['performance_recov', 'aerial_duels_won%'])
+        ]
+
+        merge_keys = ['player', 'team']
+        player_stats_df = df_std
+
+        for suffix, cols_to_keep in additional_files:
+            file_path = interim_dir / "player_season_stats" / f"{league}_{season}_{suffix}.csv"
+            try:
+                df_add = pd.read_csv(file_path)
+                
+                # Validar claves
+                if not all(k in df_add.columns for k in merge_keys):
+                    # logging.warning(f"Claves de fusión faltantes en {suffix} ({league}). Saltando.")
+                    continue
+
+                # Seleccionar columnas
+                if cols_to_keep:
+                    # Filtrar solo las que existen
+                    valid_cols = [c for c in cols_to_keep if c in df_add.columns]
+                    cols_selection = merge_keys + valid_cols
+                    df_subset = df_add[cols_selection]
+                else:
+                    df_subset = df_add
+
+                # Merge
+                player_stats_df = pd.merge(player_stats_df, df_subset, on=merge_keys, how='left')
+                
+                # Rellenar NaNs de las nuevas columnas con 0
+                new_cols = [c for c in df_subset.columns if c not in merge_keys]
+                player_stats_df[new_cols] = player_stats_df[new_cols].fillna(0)
+                
+            except FileNotFoundError:
+                # logging.warning(f"Archivo {suffix} no encontrado: {file_path}. Saltando.")
+                continue
+
+        # --- NUEVO: Cargar y fusionar Team Stats ---
+        team_stats_df = _load_team_stats(interim_dir, season, league)
+        if not team_stats_df.empty:
+            player_stats_df = pd.merge(player_stats_df, team_stats_df, on='team', how='left')
+            # Rellenar NaNs en team stats (por si acaso)
+            team_cols = [c for c in team_stats_df.columns if c != 'team']
+            player_stats_df[team_cols] = player_stats_df[team_cols].fillna(0)
+        
+        # --- NUEVO: Cargar y fusionar Shot Events ---
+        shot_events_df = _load_shot_events(interim_dir, season, league)
+        if not shot_events_df.empty:
+            # Merge por player y team
+            player_stats_df = pd.merge(player_stats_df, shot_events_df, on=['player', 'team'], how='left')
+            shot_cols = [c for c in shot_events_df.columns if c not in ['player', 'team']]
+            player_stats_df[shot_cols] = player_stats_df[shot_cols].fillna(0)
+
+        # Añadir columna de liga para trazabilidad (opcional, pero útil)
+        player_stats_df['league'] = league
+        
+        all_league_dfs.append(player_stats_df)
+
+    if not all_league_dfs:
+        return pd.DataFrame(), {}
+
+    # Concatenar todas las ligas
+    full_player_stats_df = pd.concat(all_league_dfs, ignore_index=True)
 
     # --- NUEVO: Features Derivadas ---
     # 1. Role Starter %
-    if 'playing_time_starts' in player_stats_df.columns and 'playing_time_mp' in player_stats_df.columns:
-        player_stats_df['role_starter_pct'] = player_stats_df['playing_time_starts'] / player_stats_df['playing_time_mp'].replace(0, 1)
+    if 'playing_time_starts' in full_player_stats_df.columns and 'playing_time_mp' in full_player_stats_df.columns:
+        full_player_stats_df['role_starter_pct'] = full_player_stats_df['playing_time_starts'] / full_player_stats_df['playing_time_mp'].replace(0, 1)
     
     # 2. Player Goals Ratio (vs Team Goals)
-    if 'performance_gls' in player_stats_df.columns and 'team_goals_for' in player_stats_df.columns:
-        player_stats_df['player_goals_ratio'] = player_stats_df['performance_gls'] / player_stats_df['team_goals_for'].replace(0, 1)
+    if 'performance_gls' in full_player_stats_df.columns and 'team_goals_for' in full_player_stats_df.columns:
+        full_player_stats_df['player_goals_ratio'] = full_player_stats_df['performance_gls'] / full_player_stats_df['team_goals_for'].replace(0, 1)
 
     # --- MAPEO DE COLUMNAS ---
     COLUMN_MAP = {
@@ -274,26 +297,26 @@ def _load_player_stats_for_season(interim_dir: Path, season: int) -> Tuple[pd.Da
         'age': 'age_',
     }
     
-    rename_map = {v: k for k, v in COLUMN_MAP.items() if v in player_stats_df.columns}
-    player_stats_df = player_stats_df.rename(columns=rename_map)
+    rename_map = {v: k for k, v in COLUMN_MAP.items() if v in full_player_stats_df.columns}
+    full_player_stats_df = full_player_stats_df.rename(columns=rename_map)
     
     # Columnas que *esperamos* tener después del renombre
     expected_cols_for_dropna = ['team', 'pos', 'player']
     
-    missing_cols_after_rename = [col for col in expected_cols_for_dropna if col not in player_stats_df.columns]
+    missing_cols_after_rename = [col for col in expected_cols_for_dropna if col not in full_player_stats_df.columns]
     if missing_cols_after_rename:
         logging.error(f"Columnas esperadas no se encontraron después de renombrar: {missing_cols_after_rename}")
         return pd.DataFrame(), {}
 
-    player_stats_df = player_stats_df.dropna(subset=expected_cols_for_dropna)
-    player_stats_df = player_stats_df.drop_duplicates(subset=['player'], keep='first')
-    player_stats_df = player_stats_df.reset_index(drop=True)
+    full_player_stats_df = full_player_stats_df.dropna(subset=expected_cols_for_dropna)
+    full_player_stats_df = full_player_stats_df.drop_duplicates(subset=['player'], keep='first')
+    full_player_stats_df = full_player_stats_df.reset_index(drop=True)
 
-    player_map = {row.player: row.Index for row in player_stats_df.itertuples()}
+    player_map = {row.player: row.Index for row in full_player_stats_df.itertuples()}
     
-    logging.info(f"Cargados {len(player_map)} jugadores únicos de la temporada {season}.")
+    logging.info(f"Cargados {len(player_map)} jugadores únicos de la temporada {season} (Ligas: {len(leagues)}).")
     
-    return player_stats_df, player_map
+    return full_player_stats_df, player_map
 
 
 def _create_nodes_and_features(player_stats_df: pd.DataFrame, team_stats_df: pd.DataFrame = None) -> Tuple[torch.Tensor, Dict[str, int], Dict[str, int]]:
@@ -358,25 +381,43 @@ def _create_nodes_and_features(player_stats_df: pd.DataFrame, team_stats_df: pd.
     features_df = player_stats_df[feature_cols].copy()
     logging.info(f"Usando {len(feature_cols)} features fijas para consistencia.")
 
+    # --- LIMPIEZA ESPECÍFICA DE COLUMNAS ---
+    # Limpiar columna 'age' si contiene strings tipo "28-045"
+    if 'age' in features_df.columns:
+        # Convertir a string, tomar la parte antes del guion, y convertir a float
+        features_df['age'] = features_df['age'].astype(str).apply(lambda x: x.split('-')[0] if '-' in x else x)
+        features_df['age'] = pd.to_numeric(features_df['age'], errors='coerce').fillna(0)
+
     # Limpieza de NaNs e Infinitos antes de escalar
     features_df = features_df.fillna(0)
     # Reemplazar inf/-inf con 0 (puede ocurrir por divisiones por cero)
     import numpy as np
     features_df = features_df.replace([np.inf, -np.inf], 0)
 
-    scaler = StandardScaler()
-    player_features = scaler.fit_transform(features_df)
-    num_features = player_features.shape[1]
-    
     # --- 2. Features de Equipos (Virtual Nodes) ---
     unique_teams = sorted(player_stats_df['team'].unique())
     num_players = len(player_stats_df)
     team_to_idx = {team: num_players + i for i, team in enumerate(unique_teams)}
+
+    # --- NUEVO: Features Reales de Equipos (Mean Aggregation) ---
+    # Agregamos la columna 'team' temporalmente para agrupar
+    features_df_with_team = features_df.copy()
+    features_df_with_team['team_temp_id'] = player_stats_df['team'].values
     
-    # Inicializamos features de equipo. Si tenemos team_stats_df, podríamos usarlas.
-    # Por simplicidad y compatibilidad dimensional, usaremos ceros o un embedding simple.
-    # Para mantener la dimensionalidad, usamos ceros por ahora (o podríamos proyectar team_stats).
-    team_features = torch.zeros((len(unique_teams), num_features), dtype=torch.float)
+    # Group by team and calculate mean (Centroide del equipo)
+    team_agg_df = features_df_with_team.groupby('team_temp_id').mean()
+    
+    # Ensure alignment with unique_teams
+    team_agg_df = team_agg_df.reindex(unique_teams).fillna(0)
+    
+    # Escalar features de jugadores
+    scaler = StandardScaler()
+    player_features = scaler.fit_transform(features_df)
+    num_features = player_features.shape[1]
+    
+    # Escalar features de equipos con el MISMO scaler para compartir espacio latente
+    team_features_numpy = scaler.transform(team_agg_df)
+    team_features = torch.tensor(team_features_numpy, dtype=torch.float)
     
     # --- 3. Features de Posiciones (Virtual Nodes) ---
     # Desglosamos posiciones compuestas "DF,MF" -> "DF", "MF"
@@ -577,7 +618,7 @@ if __name__ == "__main__":
         shutil.rmtree(graphs_dir)
     graphs_dir.mkdir(parents=True, exist_ok=True)
 
-    seasons_to_build = [2020, 2021, 2022, 2023, 2024]
+    seasons_to_build = [2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025]
     
     # --- 2. Construcción del Grafo ---
     build_player_graph(
@@ -598,7 +639,13 @@ if __name__ == "__main__":
                 logging.warning(f"Grafo no encontrado para {season}: {graph_path}")
                 continue
 
-            loaded_graph = torch.load(graph_path)
+            # Fix for PyTorch 2.6+ security warning/error
+            try:
+                loaded_graph = torch.load(graph_path, weights_only=False)
+            except TypeError:
+                # Fallback for older PyTorch versions that don't support weights_only
+                loaded_graph = torch.load(graph_path)
+                
             logging.info(f"Grafo cargado exitosamente: {graph_path}")
             
             # --- Estadísticas ---

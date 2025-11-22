@@ -86,6 +86,11 @@ def _compute_y_vector_from_next_season(
     for c in all_cols:
         if c not in df_next.columns:
             df_next[c] = 0.0
+            
+    # Limpieza de NaNs en las columnas objetivo
+    df_next[all_cols] = df_next[all_cols].fillna(0.0)
+    import numpy as np
+    df_next[all_cols] = df_next[all_cols].replace([np.inf, -np.inf], 0.0)
 
     num_players = len(player_index)
     d_y = len(all_cols)
@@ -109,6 +114,7 @@ def _compute_y_vector_from_next_season(
 def build_temporal_player_graphs(
     interim_dir: Path,
     seasons: List[int],
+    processed_dir: Path = None,
 ) -> List[Data]:
     """Construye una lista de grafos por temporada con X_t e Y_{t+1}.
 
@@ -117,6 +123,8 @@ def build_temporal_player_graphs(
     - ``Data_t.y`` es el vector multi‑target de la temporada ``t+1``
       (attack, creation, defense, involvement) **aplanado**.
     - Para la última temporada sin temporada siguiente, ``y`` será todo ceros.
+    - NORMALIZACIÓN: Si se proporciona ``processed_dir``, se calcula la media y std
+      de todos los targets de entrenamiento y se normaliza Y. Se guarda el scaler.
     """
 
     if not seasons:
@@ -197,6 +205,48 @@ def build_temporal_player_graphs(
 
     # Devolvemos la lista en orden temporal
     graphs_sorted = [season_to_graph[s] for s in seasons_sorted if s in season_to_graph]
+
+    # --- 3) NORMALIZACIÓN DE TARGETS (Y) ---
+    if processed_dir:
+        logging.info("Calculando normalización de targets (Y)...")
+        all_y_list = []
+        for g in graphs_sorted:
+            if hasattr(g, 'train_mask') and g.train_mask.any():
+                # Solo usamos los targets válidos para calcular mean/std
+                valid_y = g.y[g.train_mask]
+                # Filtrar filas que sean todo ceros? No, 0 es un valor válido (ej. 0 goles).
+                # Pero si el jugador no jugó, sus stats son 0.
+                # Si incluimos muchos ceros, la media baja y la std baja.
+                # Esto es correcto si queremos predecir 0 para los que no juegan.
+                all_y_list.append(valid_y)
+        
+        if all_y_list:
+            all_y_tensor = torch.cat(all_y_list, dim=0)
+            mean = all_y_tensor.mean(dim=0)
+            std = all_y_tensor.std(dim=0)
+            
+            # Evitar división por cero
+            std[std < 1e-6] = 1.0
+            
+            logging.info(f"Target Mean: {mean[:5]}...")
+            logging.info(f"Target Std: {std[:5]}...")
+            
+            # Aplicar normalización a TODOS los grafos
+            for g in graphs_sorted:
+                if hasattr(g, 'y') and g.y is not None:
+                    # Normalizamos todo Y. Los nodos masked (Teams/Pos) tienen 0.
+                    # (0 - mean) / std -> tendrán un valor negativo fijo.
+                    # Como no entrenamos sobre ellos (train_mask=False), no importa.
+                    g.y = (g.y - mean) / std
+            
+            # Guardar parámetros del scaler
+            scaler_path = processed_dir / "y_scaler_params.pt"
+            scaler_path.parent.mkdir(parents=True, exist_ok=True)
+            torch.save({'mean': mean, 'std': std}, scaler_path)
+            logging.info(f"Scaler de targets guardado en: {scaler_path}")
+        else:
+            logging.warning("No se encontraron targets válidos para calcular normalización.")
+
     return graphs_sorted
 
 

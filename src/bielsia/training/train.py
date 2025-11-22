@@ -45,10 +45,13 @@ def train(config_path: str):
     # 2. Cargar Datos
     root = Path(__file__).resolve().parents[3]
     interim_path = root / config['data']['interim_path']
+    # Asumimos que processed_path está en data/processed si no se especifica
+    processed_path = root / "data" / "processed"
     seasons = config['data']['seasons']
     
     print(f"Cargando grafos para temporadas: {seasons}")
-    graphs = build_temporal_player_graphs(interim_path, seasons)
+    # Pasamos processed_path para que se calcule y guarde la normalización de targets
+    graphs = build_temporal_player_graphs(interim_path, seasons, processed_dir=processed_path)
     
     if not graphs:
         print("Error: No se cargaron grafos.")
@@ -127,6 +130,18 @@ def train(config_path: str):
 
     # Mover grafos a dispositivo
     graphs = [g.to(device) for g in graphs]
+    
+    # Verificación de NaNs en datos de entrada
+    print("Verificando integridad de datos...")
+    for i, g in enumerate(graphs):
+        if torch.isnan(g.x).any() or torch.isinf(g.x).any():
+            print(f"ADVERTENCIA: NaNs/Infs detectados en features (x) del grafo {i} (Temporada {g.season})")
+            g.x = torch.nan_to_num(g.x, nan=0.0, posinf=0.0, neginf=0.0)
+            
+        if hasattr(g, 'y') and g.y is not None:
+            if torch.isnan(g.y).any() or torch.isinf(g.y).any():
+                print(f"ADVERTENCIA: NaNs/Infs detectados en targets (y) del grafo {i} (Temporada {g.season})")
+                g.y = torch.nan_to_num(g.y, nan=0.0, posinf=0.0, neginf=0.0)
 
     # 5. Bucle de Entrenamiento
     epochs = config['training']['epochs']
@@ -137,6 +152,8 @@ def train(config_path: str):
     
     best_test_loss = float('inf')
     best_epoch = -1
+    patience = config['training'].get('patience', float('inf'))
+    patience_counter = 0
     history = []
     
     save_dir = root / config['training']['save_dir']
@@ -209,6 +226,10 @@ def train(config_path: str):
         if valid_train_steps > 0:
             final_train_loss = total_train_loss / valid_train_steps
             final_train_loss.backward()
+            
+            # Gradient Clipping para evitar explosión de gradientes
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            
             optimizer.step()
             
             # Calcular métricas
@@ -227,6 +248,13 @@ def train(config_path: str):
                 best_test_loss = test_loss_val
                 best_epoch = epoch + 1
                 torch.save(model.state_dict(), best_model_path)
+                patience_counter = 0
+            else:
+                patience_counter += 1
+
+            if patience_counter >= patience:
+                print(f"Early stopping activado en época {epoch+1}. Sin mejora por {patience} épocas.")
+                break
             
             if (epoch + 1) % log_interval == 0:
                 print(f"Epoch {epoch+1}/{epochs} - Train Loss: {train_loss_val:.6f} - Test Loss: {test_loss_val:.6f} (Best: {best_test_loss:.6f} at Ep {best_epoch})")

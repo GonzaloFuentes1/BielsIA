@@ -1,16 +1,19 @@
 data:
   interim_path: data/interim
   seasons:
+  - 2016
+  - 2017
+  - 2018
+  - 2019
   - 2020
   - 2021
   - 2022
   - 2023
-  - 2024
 experiment:
   description: Transformer con encoder Graphormer (Improved)
   name: transformer_graphormer
 model:
-  dropout: 0.3
+  dropout: 0.5
   gnn_hidden: 256
   gnn_out: 256
   gnn_type: graphormer
@@ -25,8 +28,8 @@ model:
 training:
   batch_size: 1
   device: auto
-  epochs: 3000
-  log_interval: 100
+  epochs: 10000
+  log_interval: 50
   lr: 0.0005
   patience: 500
   save_dir: models

@@ -58,6 +58,21 @@ Se fusionan los archivos `standard`, `defense`, `passing`, `possession`, `misc`.
 - `performance_recov`: Recuperaciones de balón.
 - `aerial_duels_won%`: % Duelos aéreos ganados.
 
+#### Contexto de Equipo (Team Context) - [NUEVO]
+Features agregadas al nodo del jugador para darle contexto sobre el estilo de su equipo.
+- `team_possession`: Posesión promedio del equipo.
+- `team_goals_for`: Goles a favor del equipo.
+- `team_tackles`: Volumen defensivo del equipo.
+
+#### Métricas Avanzadas de Tiro (Shot Events) - [NUEVO]
+- `avg_shot_distance`: Distancia media de tiro.
+- `npxg_per_shot`: Calidad media de tiro (xG/tiro).
+- `sca_dependency`: % de tiros que provienen de asistencia (vs jugada individual).
+
+#### Métricas Derivadas (Derived) - [NUEVO]
+- `role_starter_pct`: % de partidos como titular (Starts / MP).
+- `player_goals_ratio`: % de goles del equipo anotados por el jugador.
+
 ---
 
 ## 2. Target de Predicción (Y) - Estado Actual
@@ -76,13 +91,15 @@ Actualmente es un vector multidimensional que incluye:
 - `per_90_minutes_xg+xag` (Contribución total esperada/90)
 
 #### Defensa
-- `tackles_tkl` (Tackles totales - *Nota: Debería normalizarse por 90 min*)
-- `int_` (Intercepciones - *Nota: Debería normalizarse por 90 min*)
-- `blocks_blocks` (Bloqueos - *Nota: Debería normalizarse por 90 min*)
-- `clr_` (Despejes - *Nota: Debería normalizarse por 90 min*)
+- `tackles_tkl` (Tackles totales)
+- `int_` (Intercepciones)
+- `blocks_blocks` (Bloqueos)
+- `clr_` (Despejes)
 
 #### Participación
 - `playing_time_90s` (Tiempo de juego, proxy de relevancia en el equipo)
+
+> **Nota sobre Normalización**: Aunque estas variables tienen escalas muy diferentes (ej. Goles ~0.3 vs Minutos ~20), el modelo aplica internamente una normalización (`StandardScaler`) durante el entrenamiento para aprender todas las dimensiones con igual peso. Las predicciones finales se desnormalizan para ser interpretables en sus unidades originales.
 
 ---
 
@@ -107,7 +124,8 @@ Se ha migrado de un grafo de jugadores conectados por equipo (clique) a una arqu
 ### Nodos
 El tensor de features `x` contiene tres tipos de nodos concatenados:
 1.  **Jugadores**: Nodos 0 a N-1. Contienen todas las features estadísticas.
-2.  **Equipos (Virtual Nodes)**: Nodos N a N+T-1. Representan a los clubes. Inicializados con vector cero (o embedding aprendible).
+2.  **Equipos (Virtual Nodes)**: Nodos N a N+T-1. Representan a los clubes.
+    *   **Actualización**: Ya no son vectores cero. Se calculan como el **centroide (promedio)** de las features de todos sus jugadores en esa temporada. Esto permite que el nodo "Man City" tenga features altas en posesión y goles, y "Sheffield" tenga features altas en defensa/tackles.
 3.  **Posiciones (Virtual Nodes)**: Nodos N+T a N+T+P-1. Representan las posiciones (GK, DF, MF, FW).
 
 ### Aristas (Hyperconnections)
@@ -139,4 +157,4 @@ Tenemos datos partido a partido. Podríamos calcular métricas de consistencia i
 *   **Disponibilidad**: Predecir `playing_time_90s` como proxy de salud física y confianza del entrenador.
 
 ### G. Ajustes Técnicos
-*   **Normalización de Y**: Asegurar que todas las variables de Y estén por 90 minutos para que sean comparables entre jugadores con distintos minutos.
+*   **Normalización de Y**: [IMPLEMENTADO] Se aplica `StandardScaler` (media 0, std 1) a los targets durante el entrenamiento para evitar que variables de gran volumen (Minutos, Tackles) dominen la función de pérdida sobre variables pequeñas (Goles, xG). Se desnormaliza para la evaluación.

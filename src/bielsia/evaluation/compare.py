@@ -3,6 +3,8 @@ import pandas as pd
 from pathlib import Path
 import argparse
 import sys
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 def compare_models(models_dir: str, output_file: str):
     path = Path(models_dir)
@@ -78,6 +80,33 @@ def compare_models(models_dir: str, output_file: str):
         out_path.parent.mkdir(parents=True, exist_ok=True)
         df.to_csv(out_path, index=False)
         print(f"\nTabla guardada en {out_path}")
+        
+        # Generar gráficos
+        plot_comparison(df, out_path.parent.parent / "figures")
+
+def plot_comparison(df: pd.DataFrame, output_dir: Path):
+    """Genera gráficos comparativos de los modelos."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # 1. Bar Plot MSE
+    plt.figure(figsize=(10, 6))
+    sns.barplot(data=df, x="Model", y="Test MSE", palette="viridis")
+    plt.title("Comparación de MSE en Test")
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    plt.savefig(output_dir / "model_mse_comparison.png")
+    plt.close()
+
+    # 2. Bar Plot MAE
+    plt.figure(figsize=(10, 6))
+    sns.barplot(data=df, x="Model", y="Test MAE", palette="magma")
+    plt.title("Comparación de MAE en Test")
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    plt.savefig(output_dir / "model_mae_comparison.png")
+    plt.close()
+    
+    print(f"Gráficos guardados en {output_dir}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

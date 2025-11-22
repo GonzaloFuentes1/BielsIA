@@ -1,11 +1,14 @@
 data:
   interim_path: data/interim
   seasons:
+  - 2016
+  - 2017
+  - 2018
+  - 2019
   - 2020
   - 2021
   - 2022
   - 2023
-  - 2024
 experiment:
   description: LSTM con encoder GAT (Improved)
   name: lstm_gat
