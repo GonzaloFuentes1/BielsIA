@@ -1,12 +1,14 @@
-
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 import json
+import torch
 from pathlib import Path
 from sklearn.metrics import r2_score
 from scipy.stats import spearmanr
+
+import argparse
 
 # Configuración
 BASE_DIR = Path("/workspace1/gonzalo.fuentes/BielsIA")
@@ -14,6 +16,7 @@ REPORTS_DIR = BASE_DIR / "reports"
 TABLES_DIR = REPORTS_DIR / "tables"
 FIGURES_DIR = REPORTS_DIR / "figures"
 MODELS_DIR = BASE_DIR / "models"
+PROCESSED_DIR = BASE_DIR / "data" / "processed"
 
 # Dimensiones (Variables de Y)
 DIMENSIONS = [
@@ -23,171 +26,196 @@ DIMENSIONS = [
     "Minutes"
 ]
 
-def load_data():
-    """Carga los datos de 2023 (Test) y 2024 (Eval)."""
-    print("Cargando datos...")
+def load_data(model_name="full"):
+    """Carga los datos de 2024 (Eval) y el Scaler."""
+    print(f"Cargando datos para modelo: {model_name}...")
     try:
-        df_2023 = pd.read_csv(TABLES_DIR / "predictions_2023_full.csv")
-        df_2024 = pd.read_csv(TABLES_DIR / "predictions_2024_full.csv")
+        suffix = "full" if model_name == "full" else model_name
         
-        # Cargar métricas de entrenamiento para referencia
-        with open(MODELS_DIR / "transformer_graphormer_metrics.json") as f:
-            train_metrics = json.load(f)
-            
-        return df_2023, df_2024, train_metrics
+        # 1. Cargar Predicciones (Ya están en escala original)
+        # Intentar cargar desde la carpeta de benchmark específica del modelo
+        benchmark_path = REPORTS_DIR / "benchmark" / model_name / f"predictions_2024_{suffix}.csv"
+        
+        if benchmark_path.exists():
+             df_2024 = pd.read_csv(benchmark_path)
+             print(f"Cargado desde: {benchmark_path}")
+        else:
+            # Fallback a la carpeta tables general (comportamiento anterior)
+            fallback_path = TABLES_DIR / f"predictions_2024_{suffix}.csv"
+            print(f"No encontrado en benchmark, intentando: {fallback_path}")
+            df_2024 = pd.read_csv(fallback_path)
+        
+        # 2. Cargar Scaler para calcular métricas normalizadas
+        scaler_path = PROCESSED_DIR / "y_scaler_params.pt"
+        scaler = None
+        if scaler_path.exists():
+            scaler = torch.load(scaler_path, map_location='cpu')
+            print("Scaler cargado exitosamente.")
+        else:
+            print("Advertencia: No se encontró scaler. No se podrán calcular métricas normalizadas.")
+
+        return df_2024, scaler
     except FileNotFoundError as e:
         print(f"Error cargando archivos: {e}")
-        return None, None, None
+        return None, None
 
-def calculate_metrics(df, year_label):
-    """Calcula métricas detalladas por dimensión."""
+def calculate_metrics(df, scaler=None):
+    """Calcula métricas en escala Original y Normalizada."""
     metrics = []
     
-    for dim in DIMENSIONS:
+    # Preparar scaler numpy si existe
+    mean_y, std_y = None, None
+    if scaler:
+        mean_y = scaler['mean'].numpy()
+        std_y = scaler['std'].numpy()
+
+    for i, dim in enumerate(DIMENSIONS):
         pred_col = f"Pred_{dim}"
         true_col = f"True_{dim}"
         
         if true_col not in df.columns:
             continue
             
-        y_true = df[true_col]
-        y_pred = df[pred_col]
+        y_true_orig = df[true_col].values
+        y_pred_orig = df[pred_col].values
         
-        # Métricas
-        mae = (y_pred - y_true).abs().mean()
-        mse = ((y_pred - y_true) ** 2).mean()
-        r2 = r2_score(y_true, y_pred)
-        corr, _ = spearmanr(y_pred, y_true)
+        # --- 1. Métricas Originales (Denormalized) ---
+        mae_orig = np.mean(np.abs(y_pred_orig - y_true_orig))
+        r2 = r2_score(y_true_orig, y_pred_orig)
         
-        # Sesgo (Bias): Mean Signed Error
-        bias = (y_pred - y_true).mean()
-        
-        # Baseline (Promedio)
-        baseline_mae = (y_true - y_true.mean()).abs().mean()
-        improvement = ((baseline_mae - mae) / baseline_mae) * 100 if baseline_mae > 0 else 0
+        # --- 2. Métricas Normalizadas (Standardized) ---
+        mae_norm = np.nan
+        if mean_y is not None and std_y is not None:
+            # Normalizar: (x - mean) / std
+            # Nota: Usamos el mean/std correspondiente a la dimensión i
+            m = mean_y[i]
+            s = std_y[i]
+            
+            y_true_norm = (y_true_orig - m) / s
+            y_pred_norm = (y_pred_orig - m) / s
+            
+            mae_norm = np.mean(np.abs(y_pred_norm - y_true_norm))
         
         metrics.append({
             "Dimensión": dim,
-            "Año": year_label,
-            "MAE": mae,
+            "MAE_Original": mae_orig,
+            "MAE_Normalizado": mae_norm,
             "R2": r2,
-            "Corr": corr,
-            "Bias": bias,
-            "Mejora_vs_Promedio_%": improvement
+            "Mean_True": np.mean(y_true_orig)
         })
         
     return pd.DataFrame(metrics)
 
-def analyze_teams_players(df, year):
-    """Analiza mejores/peores equipos y jugadores."""
-    # Calcular error promedio por jugador (normalizado por dimensión para no sesgar por volumen)
-    # Usamos error relativo simple o MAE directo si no. Usaremos MAE directo por consistencia.
-    errors = []
-    for dim in DIMENSIONS:
-        if f"True_{dim}" in df.columns:
-            errors.append((df[f"Pred_{dim}"] - df[f"True_{dim}"]).abs())
+def plot_errors(metrics_df, model_name):
+    """Genera gráficos de error Original y Normalizado."""
+    print("Generando gráficos de error...")
     
-    df['avg_error'] = pd.concat(errors, axis=1).mean(axis=1)
-    
-    # Equipos
-    team_metrics = df.groupby('team')['avg_error'].agg(['mean', 'count']).sort_values('mean')
-    best_teams = team_metrics.head(5)
-    worst_teams = team_metrics.tail(5)
-    
-    # Jugadores
-    best_players = df[['player', 'team', 'avg_error']].sort_values('avg_error').head(5)
-    worst_players = df[['player', 'team', 'avg_error']].sort_values('avg_error').tail(5)
-    
-    return best_teams, worst_teams, best_players, worst_players
+    # 1. Error Normalizado (Comparativo entre dimensiones)
+    plt.figure(figsize=(12, 6))
+    sns.barplot(data=metrics_df, x='Dimensión', y='MAE_Normalizado', palette='viridis')
+    plt.title(f'Error Normalizado (Desviaciones Estándar) - {model_name} 2024', fontsize=14)
+    plt.ylabel('MAE (Std Dev)')
+    plt.xticks(rotation=45)
+    plt.grid(axis='y', linestyle='--', alpha=0.5)
+    plt.tight_layout()
+    plt.savefig(FIGURES_DIR / f"error_normalized_2024_{model_name}.png")
+    plt.close()
 
-def plot_all_distributions(df_2023, df_2024):
-    """Genera una grilla de gráficos KDE para TODAS las dimensiones."""
-    print("Generando gráficos de distribución...")
+    # 2. Error Original (Interpretación directa)
+    # Dividimos en Ofensivo/Defensivo por escalas muy diferentes (ej. Minutos vs Goles)
+    offensive_vars = ["Goals", "xG", "npxG", "Assists", "xAG", "xG+xAG"]
+    defensive_vars = ["Tackles", "Interceptions", "Blocks", "Clearances"]
+    minutes_var = ["Minutes"]
+
+    # Ofensivo
+    df_off = metrics_df[metrics_df['Dimensión'].isin(offensive_vars)]
+    plt.figure(figsize=(10, 6))
+    sns.barplot(data=df_off, x='Dimensión', y='MAE_Original', palette='rocket')
+    plt.title(f'Error Original (Por 90 min) - Ofensivas - {model_name} 2024', fontsize=14)
+    plt.ylabel('MAE (Unidades Reales)')
+    plt.grid(axis='y', linestyle='--', alpha=0.5)
+    plt.tight_layout()
+    plt.savefig(FIGURES_DIR / f"error_original_offensive_2024_{model_name}.png")
+    plt.close()
     
-    # Configuración de la grilla (4 filas x 3 columnas para 11 variables)
+    # Defensivo
+    df_def = metrics_df[metrics_df['Dimensión'].isin(defensive_vars)]
+    plt.figure(figsize=(10, 6))
+    sns.barplot(data=df_def, x='Dimensión', y='MAE_Original', palette='mako')
+    plt.title(f'Error Original (Total Temporada) - Defensivas - {model_name} 2024', fontsize=14)
+    plt.ylabel('MAE (Unidades Reales)')
+    plt.grid(axis='y', linestyle='--', alpha=0.5)
+    plt.tight_layout()
+    plt.savefig(FIGURES_DIR / f"error_original_defensive_2024_{model_name}.png")
+    plt.close()
+
+    print("Gráficos guardados en reports/figures/")
+
+def plot_distributions_by_year(df, year_label, model_name, color_true='blue', color_pred='orange'):
+    """Genera gráficos de distribución (KDE) para Real vs Predicho."""
+    print(f"Generando distribuciones para {year_label}...")
+    
+    dist_dir = FIGURES_DIR / "distributions"
+    dist_dir.mkdir(exist_ok=True)
+
+    # Configurar grid de subplots
     n_cols = 3
-    n_rows = 4
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(20, 20))
-    fig.suptitle('Distribución Predicción vs Realidad: 2023 (Test) vs 2024 (Eval)', fontsize=20)
+    n_rows = (len(DIMENSIONS) + n_cols - 1) // n_cols
     
-    axes = axes.flatten()
+    plt.figure(figsize=(15, 4 * n_rows))
     
     for i, dim in enumerate(DIMENSIONS):
-        ax = axes[i]
+        plt.subplot(n_rows, n_cols, i + 1)
         
-        # Datos 2024 (Prioridad visual)
-        if f"True_{dim}" in df_2024.columns:
-            sns.kdeplot(df_2024[f"True_{dim}"], ax=ax, color='blue', fill=True, alpha=0.2, label='Real 2024')
-            sns.kdeplot(df_2024[f"Pred_{dim}"], ax=ax, color='orange', fill=True, alpha=0.2, label='Pred 2024')
-            
-            # Datos 2023 (Línea punteada para referencia de estabilidad)
-            sns.kdeplot(df_2023[f"True_{dim}"], ax=ax, color='green', linestyle="--", label='Real 2023')
-            
-            ax.set_title(f"{dim}", fontsize=14)
-            ax.set_xlabel("")
-            ax.legend(fontsize='small')
-            
-            # Anotación de MAE 2024
-            mae = (df_2024[f"Pred_{dim}"] - df_2024[f"True_{dim}"]).abs().mean()
-            ax.text(0.95, 0.95, f'MAE 24: {mae:.2f}', transform=ax.transAxes, ha='right', va='top', 
-                    bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
-
-    # Ocultar ejes vacíos si sobran
-    for j in range(i + 1, len(axes)):
-        axes[j].axis('off')
+        true_col = f"True_{dim}"
+        pred_col = f"Pred_{dim}"
         
-    plt.tight_layout(rect=[0, 0.03, 1, 0.97])
-    save_path = FIGURES_DIR / "full_distributions_comparison.png"
-    plt.savefig(save_path)
-    print(f"Gráfico guardado en: {save_path}")
+        if true_col in df.columns and pred_col in df.columns:
+            sns.kdeplot(df[true_col], color=color_true, label='Real', fill=True, alpha=0.3)
+            sns.kdeplot(df[pred_col], color=color_pred, label='Predicho', fill=True, alpha=0.3)
+            
+            plt.title(f"{dim}")
+            plt.xlabel("Valor")
+            plt.ylabel("Densidad")
+            if i == 0: # Solo leyenda en el primero para no saturar
+                plt.legend()
+    
+    plt.suptitle(f"Distribución Real vs Predicha ({year_label}) - {model_name}", fontsize=16)
+    plt.tight_layout()
+    plt.savefig(dist_dir / f"distribution_{year_label}_{model_name}.png")
+    plt.close()
+    print(f"Gráfico de distribuciones guardado en {dist_dir}")
 
 def main():
-    df_2023, df_2024, _ = load_data()
+    parser = argparse.ArgumentParser(description="Análisis comprensivo de resultados BielsIA")
+    parser.add_argument("--model_name", type=str, default="full", help="Nombre del modelo")
+    args = parser.parse_args()
+
+    # Limpiar gráficos antiguos de 2023 si existen
+    for f in FIGURES_DIR.glob("*2023*.png"):
+        f.unlink()
     
-    if df_2023 is None: return
+    df_2024, scaler = load_data(args.model_name)
+    
+    if df_2024 is None: return
 
     # 1. Calcular Métricas
-    metrics_23 = calculate_metrics(df_2023, "2023")
-    metrics_24 = calculate_metrics(df_2024, "2024")
+    metrics_df = calculate_metrics(df_2024, scaler)
     
-    # Unir para comparación
-    comparison = pd.merge(metrics_23, metrics_24, on="Dimensión", suffixes=('_23', '_24'))
-    
-    # Calcular degradación
-    comparison['Crecimiento_Error_%'] = ((comparison['MAE_24'] - comparison['MAE_23']) / comparison['MAE_23']) * 100
+    # Guardar CSV
+    output_csv_path = TABLES_DIR / "error_analysis_2024.csv"
+    metrics_df.to_csv(output_csv_path, index=False)
+    print(f"\n[INFO] Tabla de análisis guardada en: {output_csv_path}")
     
     # 2. Reporte de Texto
-    print("\n" + "="*100)
-    print("REPORTE UNIFICADO DE ANÁLISIS: BIELSIA (Transformer-Graphormer)")
-    print("="*100)
+    print("\n" + "="*80)
+    print(f"REPORTE DE ERROR 2024: {args.model_name}")
+    print("="*80)
+    print(metrics_df[['Dimensión', 'MAE_Original', 'MAE_Normalizado', 'R2']].round(4).to_string(index=False))
     
-    print("\n1. COMPARATIVA DE RENDIMIENTO POR VARIABLE (2023 vs 2024)")
-    print("-" * 100)
-    cols_show = ['Dimensión', 'MAE_23', 'MAE_24', 'Crecimiento_Error_%', 'R2_24', 'Corr_24', 'Bias_24']
-    print(comparison[cols_show].round(4).to_string(index=False))
-    
-    print("\n2. DIAGNÓSTICO DE CALIDAD (2024)")
-    print("-" * 100)
-    print("Variables Fiables (R2 > 0.1 & Crecimiento < 30%):")
-    reliable = comparison[(comparison['R2_24'] > 0.1) & (comparison['Crecimiento_Error_%'] < 30)]
-    print(reliable['Dimensión'].tolist() if not reliable.empty else "Ninguna")
-    
-    print("\nVariables Rotas (Crecimiento > 100%):")
-    broken = comparison[comparison['Crecimiento_Error_%'] > 100]
-    print(broken['Dimensión'].tolist() if not broken.empty else "Ninguna")
-
-    # 3. Análisis de Equipos/Jugadores 2024
-    best_t, worst_t, best_p, worst_p = analyze_teams_players(df_2024, 2024)
-    
-    print("\n3. ANÁLISIS DE CONTEXTO 2024")
-    print("-" * 100)
-    print("Top 5 Equipos Más Predecibles (Menor Error Promedio):")
-    print(best_t[['mean', 'count']].to_string())
-    print("\nTop 5 Equipos Más Caóticos:")
-    print(worst_t[['mean', 'count']].to_string())
-    
-    # 4. Generar Gráficos
-    plot_all_distributions(df_2023, df_2024)
+    # 3. Generar Gráficos
+    plot_errors(metrics_df, args.model_name)
+    plot_distributions_by_year(df_2024, "2024", args.model_name, color_true='blue', color_pred='orange')
 
 if __name__ == "__main__":
     main()

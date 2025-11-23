@@ -9,26 +9,29 @@ data:
   - 2021
   - 2022
   - 2023
+  - 2024
 experiment:
   description: LSTM con encoder GAT (Improved)
   name: lstm_gat
 model:
-  dropout: 0.3
-  gnn_hidden: 256
-  gnn_out: 256
+  dropout: 0.4
+  gnn_hidden: 128
+  gnn_out: 128
   gnn_type: gat
   heads: 8
-  hidden_channels: 256
+  hidden_channels: 128
   in_channels: auto
-  lstm_hidden: 256
+  lstm_hidden: 128
   out_channels: auto
   type: lstm
 training:
   batch_size: 1
   device: auto
   epochs: 3000
-  log_interval: 100
-  lr: 0.0005
+  log_interval: 10
+  lr: 0.0003
+  weight_decay: 0.001
   patience: 500
   save_dir: models
   save_name: lstm_gat.pth
+  split_strategy: temporal

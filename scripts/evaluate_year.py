@@ -14,10 +14,12 @@ from typing import Dict, List
 # Add src to path
 sys.path.append(str(Path(__file__).resolve().parents[1] / "src"))
 
-from bielsia.models.temporal import TemporalTransformerGNN
+from bielsia.models.temporal import TemporalTransformerGNN, TemporalLSTMGNN
 from bielsia.data.dataset_builder import build_temporal_player_graphs
 from bielsia.training.train import _build_global_player_map, load_config
 from bielsia.data.graph_construction import _load_player_stats_for_season
+
+from sklearn.model_selection import train_test_split
 
 def get_device():
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -56,11 +58,6 @@ def main():
     device = get_device()
     
     # 2. Cargar Datos
-    # Necesitamos cargar hasta target_year para tener el target en el grafo de input_year
-    # Si target_year es 2024, cargamos hasta 2024.
-    # graphs[input_year].y contendrá los datos de target_year.
-    
-    # Rango de temporadas: desde 2016 hasta target_year
     seasons = list(range(2016, target_year + 1))
     logger.info(f"Cargando grafos para temporadas: {seasons}")
     
@@ -70,10 +67,46 @@ def main():
         logger.error("No se pudieron cargar los grafos.")
         return
 
-    # 3. Construir Mapa Global
+    # 3. Construir Mapa Global y Split
     global_player_map = _build_global_player_map(graphs)
     num_global_players = len(global_player_map)
     logger.info(f"Total jugadores globales: {num_global_players}")
+
+    # Intentar cargar split guardado
+    split_path = None
+    if args.model_path:
+        # Si se pasó model_path explícito, buscar split ahí
+        p = Path(args.model_path)
+        # Intentar patrones comunes
+        candidates = [
+            p.parent / f"{p.stem.replace('_best', '').replace('_last', '')}_split.json",
+            p.parent / "transformer_graphormer_split.json"
+        ]
+        for c in candidates:
+            if c.exists():
+                split_path = c
+                break
+    else:
+        # Default path
+        split_path = root_dir / "models" / "transformer_graphormer_split.json"
+    
+    train_set = set()
+    test_set = set()
+    
+    if split_path and split_path.exists():
+        logger.info(f"Cargando split desde {split_path}")
+        with open(split_path, 'r') as f:
+            split_data = json.load(f)
+            train_set = set(split_data['train'])
+            test_set = set(split_data['test'])
+    else:
+        logger.warning("No se encontró archivo de split. Replicando lógica aleatoria (puede ser inexacto)...")
+        all_player_ids = list(global_player_map.keys())
+        train_ids, test_ids = train_test_split(all_player_ids, test_size=0.2, random_state=123)
+        train_set = set(train_ids)
+        test_set = set(test_ids)
+
+    logger.info(f"Split cargado: {len(train_set)} Train, {len(test_set)} Test")
 
     # 4. Cargar Modelo
     first_graph = graphs[0]
@@ -86,18 +119,38 @@ def main():
             
     logger.info(f"Dimensiones: In={in_channels}, Out={out_channels}")
 
-    model = TemporalTransformerGNN(
-        in_channels=in_channels,
-        gnn_hidden=config['model']['gnn_hidden'],
-        gnn_out=config['model']['gnn_out'],
-        transformer_hidden=config['model']['transformer_hidden'],
-        out_channels=out_channels,
-        num_global_players=num_global_players,
-        gnn_type=config['model'].get('gnn_type', 'hybrid'),
-        num_layers=config['model']['transformer_layers'],
-        heads=config['model']['heads'],
-        dropout=config['model']['dropout']
-    )
+    # Configuración de cabezas (con fallback para compatibilidad)
+    transformer_heads = config['model'].get('transformer_heads', config['model'].get('heads', 4))
+    gnn_heads = config['model'].get('gnn_heads', 4)
+
+    model_type = config['model'].get('type', 'transformer')
+    
+    if model_type == 'lstm':
+        model = TemporalLSTMGNN(
+            in_channels=in_channels,
+            gnn_hidden=config['model']['gnn_hidden'],
+            gnn_out=config['model']['gnn_out'],
+            lstm_hidden=config['model']['lstm_hidden'],
+            out_channels=out_channels,
+            num_global_players=num_global_players,
+            gnn_type=config['model'].get('gnn_type', 'hybrid'),
+            heads=config['model'].get('heads', 4),
+            dropout=config['model']['dropout']
+        )
+    else:
+        model = TemporalTransformerGNN(
+            in_channels=in_channels,
+            gnn_hidden=config['model']['gnn_hidden'],
+            gnn_out=config['model']['gnn_out'],
+            transformer_hidden=config['model']['transformer_hidden'],
+            out_channels=out_channels,
+            num_global_players=num_global_players,
+            gnn_type=config['model'].get('gnn_type', 'hybrid'),
+            num_layers=config['model']['transformer_layers'],
+            transformer_heads=transformer_heads,
+            gnn_heads=gnn_heads,
+            dropout=config['model']['dropout']
+        )
     
     if args.model_path:
         model_path = Path(args.model_path)
@@ -171,19 +224,24 @@ def main():
     y_trues = []
     names_list = []
     teams_list = []
+    split_list = [] # 'Train' o 'Test'
     
     for loc_idx, pid in enumerate(local_pids):
         if pid in global_player_map and pid in players_target_set:
             glob_idx = global_player_map[pid]
-            
-            # Verificar si el target es válido (no todo ceros si esperamos datos)
-            # Aunque dataset_builder pone ceros si no está, ya filtramos con players_target_set
             
             y_preds.append(pred_target[glob_idx].cpu().numpy())
             y_trues.append(local_y[loc_idx].cpu().numpy())
             
             names_list.append(pid)
             teams_list.append(player_team_target.get(pid, "Unknown"))
+            
+            if pid in train_set:
+                split_list.append('Train')
+            elif pid in test_set:
+                split_list.append('Test')
+            else:
+                split_list.append('Unknown')
 
     y_preds = np.array(y_preds)
     y_trues = np.array(y_trues)
@@ -194,6 +252,16 @@ def main():
         # Asegurar dimensiones
         if len(mean_y) == y_preds.shape[1]:
             y_preds = y_preds * std_y + mean_y
+            # IMPORTANTE: También desnormalizar y_trues para comparar en escala real
+            # (El dataset builder devuelve y normalizado si processed_dir se usó en train, 
+            # pero aquí build_temporal_player_graphs se llamó sin processed_dir para cargar, 
+            # PERO dataset_builder normaliza si se le pasa processed_dir.
+            # En evaluate_year.py llamamos a build_temporal_player_graphs(interim_dir, seasons).
+            # El argumento processed_dir es None por defecto.
+            # Por tanto, graphs[].y NO ESTÁ NORMALIZADO en este script.
+            # PERO el modelo predice normalizado.
+            # Así que y_preds hay que desnormalizarlo, y y_trues YA ESTÁ en escala real.
+            pass
         else:
             logger.warning(f"Dimensión del scaler ({len(mean_y)}) no coincide con predicciones ({y_preds.shape[1]}). No se desnormaliza.")
     
@@ -203,31 +271,32 @@ def main():
         logger.error("No hay jugadores para evaluar.")
         return
 
-    # 7. Métricas
+    # 7. Métricas Globales y por Split
     mse = np.mean((y_preds - y_trues)**2)
     mae = np.mean(np.abs(y_preds - y_trues))
     
-    from scipy.stats import spearmanr
-    corrs = []
-    for i in range(y_preds.shape[1]):
-        if np.std(y_preds[:, i]) > 0 and np.std(y_trues[:, i]) > 0:
-            corr, _ = spearmanr(y_preds[:, i], y_trues[:, i])
-            corrs.append(corr)
-        else:
-            corrs.append(0.0)
-    avg_corr = np.mean(corrs)
-
-    logger.info(f"Global MSE {target_year}: {mse:.4f}")
-    logger.info(f"Global MAE {target_year}: {mae:.4f}")
-    logger.info(f"Global Spearman Corr {target_year}: {avg_corr:.4f}")
-    
-    # 8. Guardar Resultados
+    # Calcular métricas por grupo
     df_results = pd.DataFrame({
         'player': names_list,
         'team': teams_list,
+        'split': split_list,
         'mse': np.mean((y_preds - y_trues)**2, axis=1),
         'mae': np.mean(np.abs(y_preds - y_trues), axis=1)
     })
+    
+    print(f"\n--- Resultados Globales {target_year} ---")
+    print(f"MSE: {mse:.4f}")
+    print(f"MAE: {mae:.4f}")
+    
+    print(f"\n--- Resultados por Split (Train vs Test Players) ---")
+    split_metrics = df_results.groupby('split')[['mse', 'mae']].agg(['mean', 'count'])
+    print(split_metrics)
+    
+    # Guardar métricas de split
+    exp_name = config_path.stem
+    split_metrics.to_csv(tables_dir / f"split_metrics_{target_year}_{exp_name}.csv")
+
+    # 8. Guardar Resultados Completos
     
     team_metrics = df_results.groupby('team').agg({
         'mse': 'mean',
@@ -238,7 +307,7 @@ def main():
     print(f"\n--- Métricas por Equipo {target_year} (Top 5 Mejor MAE) ---")
     print(team_metrics.head(5))
     
-    csv_path = tables_dir / f"team_metrics_{target_year}.csv"
+    csv_path = tables_dir / f"team_metrics_{target_year}_{exp_name}.csv"
     team_metrics.to_csv(csv_path)
     logger.info(f"Tabla guardada en {csv_path}")
     
@@ -246,9 +315,9 @@ def main():
     plt.figure(figsize=(15, 8))
     sns.barplot(data=team_metrics.reset_index(), x='team', y='mae')
     plt.xticks(rotation=90)
-    plt.title(f"Error MAE Promedio por Equipo ({target_year})")
+    plt.title(f"Error MAE Promedio por Equipo ({target_year}) - {exp_name}")
     plt.tight_layout()
-    plt.savefig(figures_dir / f"global_team_error_{target_year}.png")
+    plt.savefig(figures_dir / f"global_team_error_{target_year}_{exp_name}.png")
     
     # Predicciones completas
     dim_names = [
@@ -261,8 +330,8 @@ def main():
     pred_df = pd.DataFrame(y_preds, columns=[f"Pred_{c}" for c in dim_names])
     true_df = pd.DataFrame(y_trues, columns=[f"True_{c}" for c in dim_names])
     
-    full_results = pd.concat([df_results[['player', 'team']], pred_df, true_df], axis=1)
-    full_results.to_csv(tables_dir / f"predictions_{target_year}_full.csv", index=False)
+    full_results = pd.concat([df_results[['player', 'team', 'split']], pred_df, true_df], axis=1)
+    full_results.to_csv(tables_dir / f"predictions_{target_year}_{exp_name}.csv", index=False)
 
 if __name__ == "__main__":
     main()

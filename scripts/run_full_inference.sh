@@ -6,72 +6,65 @@ CONFIGS_DIR="$BASE_DIR/configs"
 REPORTS_DIR="$BASE_DIR/reports"
 MODELS_DIR="$BASE_DIR/models"
 
-# Crear directorios si no existen
-mkdir -p "$REPORTS_DIR/benchmark"
+# Activar entorno virtual explícitamente
+source /workspace1/gonzalo.fuentes/BielsIA/.venv/bin/activate
 
-# Lista de configs a ejecutar (Solo modelos simples, sin híbridos)
-CONFIGS_LIST=(
-    # "$CONFIGS_DIR/lstm_gat.yaml"
-    # "$CONFIGS_DIR/lstm_gcn.yaml"
-    # "$CONFIGS_DIR/lstm_graphormer.yaml"
-    # "$CONFIGS_DIR/transformer_gat.yaml"
-    # "$CONFIGS_DIR/transformer_gcn.yaml"
-    "$CONFIGS_DIR/transformer_graphormer.yaml"
+cd "$BASE_DIR"
+
+# Lista de todos los modelos
+MODELS=(
+    "lstm_gat"
+    "lstm_gcn"
+    "lstm_graphormer"
+    "transformer_gat"
+    "transformer_gcn"
+    "transformer_graphormer"
 )
 
 echo "========================================================"
-echo "INICIANDO BENCHMARK BIELSIA - MODELOS SIMPLES"
+echo "EJECUTANDO INFERENCIA FINAL PARA TODOS LOS MODELOS"
 echo "========================================================"
 
-for config_file in "${CONFIGS_LIST[@]}"; do
-    model_name=$(basename "$config_file" .yaml)
+for model_name in "${MODELS[@]}"; do
+    config_file="$CONFIGS_DIR/${model_name}.yaml"
+    
     echo ""
     echo "--------------------------------------------------------"
     echo "Procesando Modelo: $model_name"
     echo "--------------------------------------------------------"
 
-    # 1. Entrenamiento
-    echo "[1/4] Entrenando..."
-    python3 src/bielsia/training/train.py --config "$config_file"
-    
-    if [ $? -ne 0 ]; then
-        echo "ERROR: Falló el entrenamiento de $model_name. Saltando..."
-        continue
-    fi
-
     # Identificar el mejor modelo guardado
     best_model_path="$MODELS_DIR/${model_name}_best.pth"
     
-    # Fallback si está en models/saved
-    if [ ! -f "$best_model_path" ]; then
-        best_model_path="$MODELS_DIR/saved/${model_name}_best.pth"
-    fi
-
     if [ ! -f "$best_model_path" ]; then
         echo "ERROR: No se encontró el modelo entrenado en $best_model_path"
         continue
     fi
+    
+    echo "Modelo encontrado: $best_model_path"
 
-    # 2. Evaluación 2024 (Out-of-Sample / Test)
-    echo "[2/3] Evaluando 2024..."
+    # 1. Evaluación 2024 (Out-of-Sample / Test)
+    echo "[1/2] Evaluando 2024..."
     python3 scripts/evaluate_year.py --year 2024 --config "$config_file" --model_path "$best_model_path"
 
-    # 3. Análisis Comprensivo y Guardado de Resultados
-    echo "[3/3] Generando Reportes..."
+    # 2. Análisis Comprensivo y Guardado de Resultados
+    echo "[2/2] Generando Reportes..."
     python3 scripts/comprehensive_analysis.py --model_name "$model_name"
 
-    # 4. Mover resultados a carpeta específica del modelo
+    # 3. Mover resultados a carpeta específica del modelo
     MODEL_RESULT_DIR="$REPORTS_DIR/benchmark/$model_name"
     mkdir -p "$MODEL_RESULT_DIR"
     
     # Mover tablas
     mv "$REPORTS_DIR/tables/predictions_2024_${model_name}.csv" "$MODEL_RESULT_DIR/" 2>/dev/null
-    mv "$REPORTS_DIR/tables/error_analysis_by_dimension.csv" "$MODEL_RESULT_DIR/" 2>/dev/null
+    mv "$REPORTS_DIR/tables/error_analysis_2024.csv" "$MODEL_RESULT_DIR/" 2>/dev/null
     mv "$REPORTS_DIR/tables/team_metrics_2024_${model_name}.csv" "$MODEL_RESULT_DIR/" 2>/dev/null
     mv "$REPORTS_DIR/tables/split_metrics_2024_${model_name}.csv" "$MODEL_RESULT_DIR/" 2>/dev/null
 
     # Mover figuras
-    mv "$REPORTS_DIR/figures/"*.png "$MODEL_RESULT_DIR/" 2>/dev/null
+    mv "$REPORTS_DIR/figures/"*${model_name}.png "$MODEL_RESULT_DIR/" 2>/dev/null
+    # Mover visualizaciones de hipergrafos si se generaron
+    mv "$REPORTS_DIR/figures/hypergraph_visualization_"*.png "$MODEL_RESULT_DIR/" 2>/dev/null
 
     echo "Resultados guardados en: $MODEL_RESULT_DIR"
 done
@@ -84,5 +77,5 @@ python3 scripts/compare_models.py
 
 echo ""
 echo "========================================================"
-echo "BENCHMARK FINALIZADO"
+echo "INFERENCIA FINAL COMPLETADA"
 echo "========================================================"

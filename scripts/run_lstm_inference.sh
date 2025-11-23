@@ -9,18 +9,18 @@ MODELS_DIR="$BASE_DIR/models"
 # Crear directorios si no existen
 mkdir -p "$REPORTS_DIR/benchmark"
 
-# Lista de configs a ejecutar (Solo modelos simples, sin híbridos)
+# Activar entorno virtual
+source /workspace1/gonzalo.fuentes/BielsIA/.venv/bin/activate
+
+# Lista de configs a ejecutar (Solo LSTMs que ya entrenaron)
 CONFIGS_LIST=(
-    # "$CONFIGS_DIR/lstm_gat.yaml"
-    # "$CONFIGS_DIR/lstm_gcn.yaml"
-    # "$CONFIGS_DIR/lstm_graphormer.yaml"
-    # "$CONFIGS_DIR/transformer_gat.yaml"
-    # "$CONFIGS_DIR/transformer_gcn.yaml"
-    "$CONFIGS_DIR/transformer_graphormer.yaml"
+    "$CONFIGS_DIR/lstm_gat.yaml"
+    "$CONFIGS_DIR/lstm_gcn.yaml"
+    "$CONFIGS_DIR/lstm_graphormer.yaml"
 )
 
 echo "========================================================"
-echo "INICIANDO BENCHMARK BIELSIA - MODELOS SIMPLES"
+echo "RECUPERANDO INFERENCIA PARA LSTMs"
 echo "========================================================"
 
 for config_file in "${CONFIGS_LIST[@]}"; do
@@ -29,15 +29,6 @@ for config_file in "${CONFIGS_LIST[@]}"; do
     echo "--------------------------------------------------------"
     echo "Procesando Modelo: $model_name"
     echo "--------------------------------------------------------"
-
-    # 1. Entrenamiento
-    echo "[1/4] Entrenando..."
-    python3 src/bielsia/training/train.py --config "$config_file"
-    
-    if [ $? -ne 0 ]; then
-        echo "ERROR: Falló el entrenamiento de $model_name. Saltando..."
-        continue
-    fi
 
     # Identificar el mejor modelo guardado
     best_model_path="$MODELS_DIR/${model_name}_best.pth"
@@ -51,14 +42,16 @@ for config_file in "${CONFIGS_LIST[@]}"; do
         echo "ERROR: No se encontró el modelo entrenado en $best_model_path"
         continue
     fi
+    
+    echo "Modelo encontrado: $best_model_path"
 
     # 2. Evaluación 2024 (Out-of-Sample / Test)
-    echo "[2/3] Evaluando 2024..."
-    python3 scripts/evaluate_year.py --year 2024 --config "$config_file" --model_path "$best_model_path"
+    echo "[1/2] Evaluando 2024..."
+    python3 "$BASE_DIR/scripts/evaluate_year.py" --year 2024 --config "$config_file" --model_path "$best_model_path"
 
     # 3. Análisis Comprensivo y Guardado de Resultados
-    echo "[3/3] Generando Reportes..."
-    python3 scripts/comprehensive_analysis.py --model_name "$model_name"
+    echo "[2/2] Generando Reportes..."
+    python3 "$BASE_DIR/scripts/comprehensive_analysis.py" --model_name "$model_name"
 
     # 4. Mover resultados a carpeta específica del modelo
     MODEL_RESULT_DIR="$REPORTS_DIR/benchmark/$model_name"
@@ -78,11 +71,5 @@ done
 
 echo ""
 echo "========================================================"
-echo "GENERANDO COMPARATIVA FINAL ENTRE MODELOS"
-echo "========================================================"
-python3 scripts/compare_models.py
-
-echo ""
-echo "========================================================"
-echo "BENCHMARK FINALIZADO"
+echo "RECUPERACIÓN FINALIZADA"
 echo "========================================================"
